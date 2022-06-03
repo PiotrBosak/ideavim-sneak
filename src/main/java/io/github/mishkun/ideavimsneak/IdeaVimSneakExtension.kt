@@ -18,14 +18,18 @@
  */
 package io.github.mishkun.ideavimsneak
 
-import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.ScrollType
+import com.intellij.openapi.editor.actionSystem.EditorActionManager
+import com.intellij.openapi.editor.actionSystem.TypedAction
+import com.intellij.openapi.editor.colors.ColorKey
 import com.intellij.openapi.editor.colors.EditorColors
+import com.intellij.openapi.editor.event.CaretListener
 import com.intellij.openapi.editor.markup.*
 import com.intellij.openapi.util.Disposer
+import com.intellij.ui.JBColor
 import com.maddyhome.idea.vim.VimProjectService
 import com.maddyhome.idea.vim.common.TextRange
 import com.maddyhome.idea.vim.extension.VimExtension
@@ -33,16 +37,21 @@ import com.maddyhome.idea.vim.extension.VimExtensionFacade
 import com.maddyhome.idea.vim.extension.VimExtensionHandler
 import com.maddyhome.idea.vim.extension.highlightedyank.DEFAULT_HIGHLIGHT_DURATION
 import com.maddyhome.idea.vim.helper.StringHelper
-import com.maddyhome.idea.vim.option.StrictMode
 import com.maddyhome.idea.vim.option.OptionsManager
+import com.maddyhome.idea.vim.option.StrictMode
+import java.awt.Color
 import java.awt.Font
 import java.awt.event.KeyEvent
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 private const val DEFAULT_HIGHLIGHT_DURATION: Long = 300
+
 class IdeaVimSneakExtension : VimExtension {
+    data class Match(val start: Int, val end: Int)
+
     override fun getName(): String = "sneak"
+
 
     override fun init() {
         val highlightHandler = HighlightHandler()
@@ -60,13 +69,17 @@ class IdeaVimSneakExtension : VimExtension {
     }
 
     private class SneakHandler(
-        private val highlightHandler: HighlightHandler,
-        private val direction: Direction
+            private val highlightHandler: HighlightHandler,
+            private val direction: Direction
     ) : VimExtensionHandler {
         override fun execute(editor: Editor, context: DataContext) {
+            editor.caretModel.addCaretListener(CursorChangeLsitner())
             val charone = getChar(editor) ?: return
             val chartwo = getChar(editor) ?: return
             val range = jumpTo(editor, charone, chartwo, direction)
+            if(range != null) {
+                colorNicely(editor, charone, chartwo, direction, range.startOffset)
+            }
             range?.let { highlightHandler.highlightSneakRange(editor, range) }
             lastSymbols = "${charone}${chartwo}"
             lastSDirection = direction
@@ -84,7 +97,7 @@ class IdeaVimSneakExtension : VimExtension {
     /**
      * This class acts as proxy for normal find commands because we need to update [lastSDirection]
      */
-    private class SneakMemoryHandler(private val char: String): VimExtensionHandler {
+    private class SneakMemoryHandler(private val char: String) : VimExtensionHandler {
         override fun execute(editor: Editor, context: DataContext) {
             lastSDirection = null
             VimExtensionFacade.executeNormalWithoutMapping(StringHelper.parseKeys(char), editor)
@@ -92,14 +105,17 @@ class IdeaVimSneakExtension : VimExtension {
     }
 
     private class SneakRepeatHandler(
-        private val highlightHandler: HighlightHandler,
-        private val direction: RepeatDirection
+            private val highlightHandler: HighlightHandler,
+            private val direction: RepeatDirection
     ) : VimExtensionHandler {
         override fun execute(editor: Editor, context: DataContext) {
             val lastSDirection = lastSDirection
             if (lastSDirection != null) {
                 val (charone, chartwo) = lastSymbols.toList()
                 val jumpRange = jumpTo(editor, charone, chartwo, direction.map(lastSDirection))
+                if(jumpRange != null) {
+                    colorNicely(editor, charone, chartwo, direction.map(lastSDirection), jumpRange.startOffset)
+                }
                 jumpRange?.let { highlightHandler.highlightSneakRange(editor, jumpRange) }
             } else {
                 VimExtensionFacade.executeNormalWithoutMapping(StringHelper.parseKeys(direction.symb), editor)
@@ -120,7 +136,59 @@ class IdeaVimSneakExtension : VimExtension {
             editor.scrollingModel.scrollToCaret(ScrollType.MAKE_VISIBLE)
             return foundPosition?.let { TextRange(foundPosition, foundPosition + 2) }
         }
+
+        private fun colorNicely(editor: Editor, charone: Char, chartwo: Char, sneakDirection: Direction, current: Int) {
+
+            val caret = editor.caretModel.primaryCaret
+            val position = caret.offset
+            val chars = editor.document.charsSequence
+            val matches = sneakDirection.findAllMatches(chars, position, charone, chartwo)
+            if (matches.isNotEmpty()) {
+                CursorChangeLsitner().update(editor)
+                matches.forEach { match ->
+                    if (match.start != current) {
+
+                        val highlighter = editor.markupModel.addRangeHighlighter(
+                                match.start,
+                                match.end,
+                                HighlighterLayer.SELECTION,
+                                TextAttributes(
+                                        null,
+                                        EditorColors.WRITE_SEARCH_RESULT_ATTRIBUTES.defaultAttributes.backgroundColor,
+                                        editor.colorsScheme.getColor(EditorColors.CARET_COLOR),
+                                        EffectType.SEARCH_MATCH,
+                                        Font.PLAIN
+                                ),
+                                HighlighterTargetArea.EXACT_RANGE
+                        )
+                        IdeaVim.myHighlighters.add(highlighter)
+                    }
+                    else {
+                        println("QQQQQQQQQQQQQQQ")
+                        val color = ColorKey.createColorKey("",JBColor(Color(0xffffff),Color(0xffffff)))
+                        val highlighter = editor.markupModel.addRangeHighlighter(
+                                match.start,
+                                match.end,
+                                HighlighterLayer.HYPERLINK,
+                                TextAttributes(
+                                        null,
+                                        EditorColors.TEXT_SEARCH_RESULT_ATTRIBUTES.defaultAttributes.backgroundColor,
+                                        editor.colorsScheme.getColor(color),
+                                        EffectType.SEARCH_MATCH,
+                                        Font.PLAIN
+                                ),
+                                HighlighterTargetArea.EXACT_RANGE
+                        )
+                        IdeaVim.myHighlighters.add(highlighter)
+                    }
+                }
+
+                IdeaVim.currentPosition = current
+                IdeaVim.editor = editor
+            }
+        }
     }
+
 
     private enum class Direction(val offset: Int) {
         FORWARD(1) {
@@ -131,6 +199,16 @@ class IdeaVimSneakExtension : VimExtension {
                     }
                 }
                 return null
+            }
+
+            override fun findAllMatches(charSequence: CharSequence, position: Int, charone: Char, chartwo: Char): List<Match> {
+                val list = ArrayList<Match>()
+                for (i in (position + offset) until charSequence.length - 1) {
+                    if (matches(charSequence, i, charone, chartwo)) {
+                        list.add(Match(i, i + 2))
+                    }
+                }
+                return list
             }
         },
         BACKWARD(-1) {
@@ -143,8 +221,20 @@ class IdeaVimSneakExtension : VimExtension {
                 return null
             }
 
+            override fun findAllMatches(charSequence: CharSequence, position: Int, charone: Char, chartwo: Char): List<Match> {
+                val list = ArrayList<Match>()
+                for (i in (position + offset) downTo 0) {
+                    if (matches(charSequence, i, charone, chartwo)) {
+                        list.add(Match(i, i + 2))
+                    }
+                }
+                return list
+            }
+
         };
+
         abstract fun findBiChar(charSequence: CharSequence, position: Int, charone: Char, chartwo: Char): Int?
+        abstract fun findAllMatches(charSequence: CharSequence, position: Int, charone: Char, chartwo: Char): List<Match>
 
         fun matches(charSequence: CharSequence, charPosition: Int, charOne: Char, charTwo: Char): Boolean {
             var match = charSequence[charPosition].equals(charOne, ignoreCase = OptionsManager.ignorecase.isSet) &&
@@ -165,11 +255,12 @@ class IdeaVimSneakExtension : VimExtension {
             override fun map(direction: Direction): Direction = direction
         },
         REVERSE(",") {
-            override fun map(direction: Direction): Direction = when(direction) {
+            override fun map(direction: Direction): Direction = when (direction) {
                 Direction.FORWARD -> Direction.BACKWARD
                 Direction.BACKWARD -> Direction.FORWARD
             }
         };
+
         abstract fun map(direction: Direction): Direction
     }
 
@@ -208,11 +299,11 @@ class IdeaVimSneakExtension : VimExtension {
 
         private fun highlightSingleRange(editor: Editor, range: ClosedRange<Int>) {
             val highlighter = editor.markupModel.addRangeHighlighter(
-                range.start,
-                range.endInclusive,
-                HighlighterLayer.SELECTION,
-                getHighlightTextAttributes(),
-                HighlighterTargetArea.EXACT_RANGE
+                    range.start,
+                    range.endInclusive,
+                    HighlighterLayer.SELECTION,
+                    getHighlightTextAttributes(),
+                    HighlighterTargetArea.EXACT_RANGE
             )
 
             sneakHighlighters.add(highlighter)
@@ -223,17 +314,24 @@ class IdeaVimSneakExtension : VimExtension {
         private fun setClearHighlightRangeTimer(highlighter: RangeHighlighter) {
             Executors.newSingleThreadScheduledExecutor().schedule({
                 ApplicationManager.getApplication().invokeLater {
-                    editor?.markupModel?.removeHighlighter(highlighter) ?: StrictMode.fail("Highlighters without an editor")
+                    editor?.markupModel?.removeHighlighter(highlighter)
+                            ?: StrictMode.fail("Highlighters without an editor")
                 }
             }, DEFAULT_HIGHLIGHT_DURATION, TimeUnit.MILLISECONDS)
         }
 
         private fun getHighlightTextAttributes() = TextAttributes(
-            null,
-            EditorColors.TEXT_SEARCH_RESULT_ATTRIBUTES.defaultAttributes.backgroundColor,
-            editor?.colorsScheme?.getColor(EditorColors.CARET_COLOR),
-            EffectType.SEARCH_MATCH,
-            Font.PLAIN
+                null,
+                EditorColors.TEXT_SEARCH_RESULT_ATTRIBUTES.defaultAttributes.backgroundColor,
+                editor?.colorsScheme?.getColor(EditorColors.CARET_COLOR),
+                EffectType.SEARCH_MATCH,
+                Font.PLAIN
         )
     }
+}
+
+object IdeaVim {
+    val myHighlighters: MutableSet<RangeHighlighter> = mutableSetOf()
+    var currentPosition: Int = 0
+    var editor: Editor? = null
 }
